@@ -1,40 +1,45 @@
 from multiprocessing import Process, Pipe, Value
 import random
 import time
+import numpy as np
 
 
-def process_i(id, pipes, GSN):
-    logical_time = 0
+def process_i(id, pipes, GSN, n):
+    # logical_time = 0
+    vector_clock = np.zeros(n, dtype=np.int16)
 
-    while GSN.value < 1000:
+    while GSN.value < 50:
 
         # SEND EVENT
         pipe = random.choice(pipes)
         with GSN.get_lock():
             GSN.value += 1
 
-        logical_time += 1
-        print(f'Time: {logical_time};    Type: SEN;    MyID: {id};    OtherID: ?')
-        pipe.send((id, logical_time))
+        # logical_time += 1
+        vector_clock[id] += 1
+        print(f'Time: {vector_clock};    Type: SEN;    MyID: {id};    OtherID: ?')
+        pipe.send((id, vector_clock))
         time.sleep(random.randint(1, 10))
 
         # RECEIVE EVENT
         for pipe in pipes:
             while pipe.poll():
                 try:
-                    msg, other_time = pipe.recv()
+                    msg, other_clock = pipe.recv()
                 except EOFError:
                     pipes.remove(pipe)
                 else:
                     with GSN.get_lock():
                         GSN.value += 1
-                    logical_time = max(logical_time, other_time) + 1
-                    print(f'Time: {logical_time};    Type: REC;    MyID: {id};    OtherID: {msg}')
+                    # logical_time = max(logical_time, other_time) + 1
+                    np.maximum(vector_clock, other_clock, vector_clock)
+                    vector_clock[id] += 1
+                    print(f'Time: {vector_clock};    Type: REC;    MyID: {id};    OtherID: {msg}')
 
 
 if __name__ == '__main__':
     print('Main process started')
-    n = 100
+    n = 2
     pipes = [[] for _ in range(n)]
     GSN = Value('i')
 
@@ -49,7 +54,7 @@ if __name__ == '__main__':
 
     processes = []
     for i in range(n):
-        process = Process(target=process_i, args=(i, pipes[i], GSN))
+        process = Process(target=process_i, args=(i, pipes[i], GSN, n))
         processes.append(process)
 
     for process in processes:
