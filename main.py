@@ -1,14 +1,14 @@
-from multiprocessing import Process, Pipe, Value
+from multiprocessing import Process, Pipe, Value, Queue
 import random
 import time
 import numpy as np
+from queue import Empty
 
 
-def process_i(id, pipes, GSN, n, m, k, prob):
-
+def process(process_id, send_conns, receive_conn, GSN, n, m, k, prob):
     def update_clock():
         # update vector clock
-        vector_clock[id] += 1
+        vector_clock[process_id] += 1
 
         # update bloom clock
         for seed in range(k):
@@ -17,17 +17,17 @@ def process_i(id, pipes, GSN, n, m, k, prob):
             bloom_clock[index] += 1
 
     # initialize the clocks
-    vector_clock = np.zeros(n)
-    bloom_clock = np.zeros(m)
+    vector_clock = np.zeros(n, dtype=np.uint32)
+    bloom_clock = np.zeros(m, dtype=np.uint32)
 
     while GSN.value < 100:
 
         # SEND EVENT
         with GSN.get_lock():
             GSN.value += 1
-        pipe = random.choice(pipes)
         update_clock()
-        pipe.send((vector_clock, bloom_clock))
+        pj_queue = random.choice(send_conns)
+        pj_queue.put((vector_clock, bloom_clock))
 
         # INTERNAL EVENT
         uniform_dist_val = random.random()
@@ -38,21 +38,19 @@ def process_i(id, pipes, GSN, n, m, k, prob):
             time.sleep(uniform_dist_val)
 
         # RECEIVE EVENT
-        for pipe in pipes:
-            while GSN.value < 100 and pipe.poll():
-                try:
-                    other_vector_clock, other_bloom_clock = pipe.recv()
-                except EOFError:
-                    pipes.remove(pipe)
-                else:
-                    with GSN.get_lock():
-                        GSN.value += 1
-                    np.maximum(vector_clock, other_vector_clock, vector_clock)
-                    np.maximum(bloom_clock, other_bloom_clock, bloom_clock)
-                    update_clock()
+        try:
+            other_vector_clock, other_bloom_clock = receive_conn.get(block=False)
+        except Empty:
+            pass
+        else:
+            with GSN.get_lock():
+                GSN.value += 1
+            np.maximum(vector_clock, other_vector_clock, vector_clock)
+            np.maximum(bloom_clock, other_bloom_clock, bloom_clock)
+            update_clock()
 
     # final state of the clocks
-    print(f'Process {id}:\nVector Clock -> {vector_clock}\nBloom Clock -> {bloom_clock}\n')
+    print(f'Process {process_id}:\nVector Clock -> {vector_clock}\nBloom Clock -> {bloom_clock}\n')
 
 
 if __name__ == '__main__':
@@ -60,46 +58,43 @@ if __name__ == '__main__':
     print('Main process started')
 
     # define parameters n, m, and k
-    n = 20
-    m = int(0.1 * n)
-    k = 2
+    num_processes = 20
+    bloom_size = int(0.1 * num_processes)
+    num_hash = 2
 
     # probability of an internal event
-    prob = 1
+    internal_prob = 0
 
     # initialize shared memory variables
-    GSN = Value('i')
+    global_seq_num = Value('i')
 
-    # initialize the pipe objects for message-passing
-    pipes = [[] for _ in range(n)]
-    for i in range(n):
-        for j in range(i + 1, n):
-            first_end, second_end = Pipe()
-            pipes[i].append(first_end)
-            pipes[j].append(second_end)
+    # initialize the queue objects for message passing communication
+    queue_objs = []
+    for _ in range(num_processes):
+        queue_objs.append(Queue())
 
     # create process objects with the required arguments
     processes = []
-    for i in range(n):
-        process = Process(target=process_i, kwargs={'id': i,
-                                                    'pipes': pipes[i],
-                                                    'GSN': GSN,
-                                                    'n': n,
-                                                    'm': m,
-                                                    'k': k,
-                                                    'prob': prob})
-        processes.append(process)
+    for i in range(num_processes):
+        process_queues = queue_objs[:]
+        self_queue = process_queues.pop(i)
+        other_queues = process_queues
+        process_obj = Process(target=process, kwargs=dict(process_id=i, receive_conn=self_queue,
+                                                          send_conns=other_queues, GSN=global_seq_num,
+                                                          n=num_processes, m=bloom_size, k=num_hash,
+                                                          prob=internal_prob))
+        processes.append(process_obj)
 
     # run the processes
-    for process in processes:
-        process.start()
+    for process_obj in processes:
+        process_obj.start()
 
     # wait for the children processes to finish
-    for process in processes:
-        process.join()
+    for process_obj in processes:
+        process_obj.join()
 
     # plotting logic starts here
     # TODO: plot the results
 
     # end of program
-    print(f'Main process ended (GSN value = {GSN.value})')
+    print(f'Main process ended (GSN value = {global_seq_num.value})')
