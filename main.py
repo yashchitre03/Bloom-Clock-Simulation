@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 
 def positive_probability(m, By, Bz):
     """
-    calculates the probability of a positive
+    calculates the probability of a positive using the binomial distribution
     :param m: the size of bloom clock
     :param By: bloom clock By
     :param Bz: bloom clock bz
@@ -25,7 +25,7 @@ def positive_probability(m, By, Bz):
     for i in range(m):
         sum_b = 0
         for l in range(By[i]):
-            # bernoulli trial formula
+            # binomial distribution formula
             sum_b += comb(n, l) * (p ** l) * ((1 - p) ** (n - l))
         probability *= (1 - sum_b)
 
@@ -33,7 +33,21 @@ def positive_probability(m, By, Bz):
 
 
 def process(process_id, send_conns, receive_conn, GSN, parent_queue):
+    """
+    code for each process Pi to run asynchronously
+    :param process_id: unique identifier for each process
+    :param send_conns: queues of other processes
+    :param receive_conn: queue of itself
+    :param GSN: Global Sequence Number
+    :param parent_queue: queue to send the simulation data for later processing
+    :return: --
+    """
+
     def update_clock():
+        """
+        updates the vector and bloom clocks of the process
+        :return:
+        """
         # update vector clock
         vector_clock[process_id] += 1
 
@@ -100,17 +114,12 @@ def process(process_id, send_conns, receive_conn, GSN, parent_queue):
         time.sleep(random.random())
 
     # final state of the clocks
-    # print(f'Process {process_id}:\nVector Clock -> {vector_clock}\nBloom Clock -> {bloom_clock}\n')
+    # print(f'Process {process_id}')
 
 
 if __name__ == '__main__':
     # start of program
     print('Main process started')
-
-    # define parameters n, m, and k
-    n = 20
-    m = int(0.1 * n)
-    k = 2
 
     # probability of an internal event
     internal_prob = 0
@@ -118,54 +127,67 @@ if __name__ == '__main__':
     # initialize shared memory variables
     global_seq_num = Value('i')
 
-    # initialize the queue objects for message passing communication
-    queue_objs = []
-    for _ in range(n):
-        queue_objs.append(Queue())
+    for n in (100, 200, 300):
+        # the important GSN values to capture for final results
+        lower_limit = (10 * n)
+        upper_limit = n ** 2 + (10 * n)
+        capture_values = {val for val in range(lower_limit + 1, upper_limit, 10)}
+        capture_values.add(lower_limit)
 
-    # the important GSN values to capture for final results
-    lower_limit = (10 * n)
-    upper_limit = n ** 2 + (10 * n)
-    capture_values = {val for val in range(lower_limit + 1, upper_limit, 10)}
-    capture_values.add(lower_limit)
+        for m in (int(0.1 * n), int(0.2 * n), int(0.3 * n)):
+            for k in (2, 3, 4):
+                # reset GSN
+                global_seq_num.value = 0
 
-    # main queue to get the desired data from the simulation
-    main_queue = Queue()
+                # initialize the queue objects for message passing communication
+                queue_objs = []
+                for _ in range(n):
+                    queue_objs.append(Queue())
 
-    # create process objects with the required arguments
-    processes = []
-    for i in range(n):
-        process_queues = queue_objs[:]
-        self_queue = process_queues.pop(i)
-        other_queues = process_queues
-        process_obj = Process(target=process, kwargs=dict(process_id=i, receive_conn=self_queue,
-                                                          send_conns=other_queues, GSN=global_seq_num,
-                                                          parent_queue=main_queue))
-        processes.append(process_obj)
+                # main queue to get the desired data from the simulation
+                main_queue = Queue()
 
-    # run the processes
-    for process_obj in processes:
-        process_obj.start()
+                # create process objects with the required arguments
+                processes = []
+                for i in range(n):
+                    process_queues = queue_objs[:]
+                    self_queue = process_queues.pop(i)
+                    other_queues = process_queues
+                    process_obj = Process(target=process, kwargs=dict(process_id=i, receive_conn=self_queue,
+                                                                      send_conns=other_queues, GSN=global_seq_num,
+                                                                      parent_queue=main_queue))
+                    processes.append(process_obj)
 
-    # wait for the children processes to finish
-    for process_obj in processes:
-        process_obj.join()
+                # run the processes
+                for process_obj in processes:
+                    process_obj.start()
 
-    # extract data from the main queue
-    res = []
-    while not main_queue.empty():
-        res.append(main_queue.get(block=False))
-    res.sort()
+                # extract data from the main queue
+                res = []
+                for _ in range(len(capture_values)):
+                    res.append(main_queue.get())
 
-    # calculate the probabilities for each data point
-    By = res[0][1]
-    plot_data = []
-    for gsn, Bz in res[1: ]:
-        pr_p = positive_probability(m, By, Bz)
-        plot_data.append((gsn, pr_p))
+                # wait for the children processes to finish
+                for process_obj in processes:
+                    process_obj.join()
 
-    # plot the data
-    plt.plot(*(zip(*plot_data)))
+                # calculate the probabilities for each data point
+                res.sort()
+                By = res[0][1]
+                plot_data = []
+                for gsn, Bz in res[1:]:
+                    pr_p = positive_probability(m, By, Bz)
+                    plot_data.append((gsn, pr_p))
+
+                # plot the data
+                font_styling = dict(fontsize=20, fontweight='bold')
+                fig = plt.figure(figsize=(20, 10))
+                fig.set_facecolor('grey')
+                plt.title(label=f'n = {n}; m = {m}; k = {k}', fontdict=font_styling)
+                plt.xlabel('GSN (Global Sequence Number)', fontdict=font_styling)
+                plt.ylabel('Pr_p (Probability of positive)', fontdict=font_styling)
+                plt.scatter(*(zip(*plot_data)))
+                plt.show()
 
     # end of program
     print(f'Main process ended (GSN value = {global_seq_num.value})')
