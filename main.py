@@ -5,6 +5,8 @@ import time
 import numpy as np
 from queue import Empty
 import matplotlib.pyplot as plt
+import matplotlib.lines as mlines
+from google.colab import files
 
 
 def positive_probability(By, Bz):
@@ -31,7 +33,41 @@ def positive_probability(By, Bz):
     return probability
 
 
-def plot(title, x_label, y_label, x_data, y_data, color, font_styles=dict(fontsize=20, fontweight='bold')):
+def compute_metrics(events_data):
+    """
+    computes the accuracy, precision, and false positive rate of the events from the execution slice
+    :param events_data: list of gsn, vector clocks, and bloom clocks for the execution slice
+    :return: accuracy, precision, and false positive rate
+    """
+    true_positive, true_negative, false_positive, false_negative = 0, 0, 0, 0
+    for y in range(len(events_data)):
+        for z in range(len(events_data)):
+            if y == z:
+                continue
+
+            _, Vy, By = events_data[y]
+            _, Vz, Bz = events_data[z]
+
+            vector_y_before_z = (Vy < Vz).all()
+            bloom_y_before_z = (Bz >= By).all()
+
+            if vector_y_before_z and bloom_y_before_z:
+                true_positive += 1
+            elif vector_y_before_z and not bloom_y_before_z:
+                false_negative += 1
+            elif not vector_y_before_z and bloom_y_before_z:
+                false_positive += 1
+            else:
+                true_negative += 1
+
+    accuracy = (true_positive + true_negative) / (true_positive + true_negative + false_positive + false_negative)
+    precision = true_positive / (true_positive + false_positive)
+    fpr = false_positive / (false_positive + true_negative)
+
+    return round(accuracy, 4), round(precision, 4), round(fpr, 4)
+
+
+def plot(title, x_label, y_label, x_data, y_data, color, font_styles=dict(fontsize=20, fontweight='bold'), legend=True):
     """
     plots data for given values
     :param title: heading of the plot
@@ -49,7 +85,15 @@ def plot(title, x_label, y_label, x_data, y_data, color, font_styles=dict(fontsi
     plt.xlabel(x_label, fontdict=font_styles)
     plt.ylabel(y_label, fontdict=font_styles)
     plt.scatter(x_data, y_data, c=color)
+    if legend:
+        red_dot = mlines.Line2D([], [], color='red', marker='o', linestyle='None',
+                                markersize=10, label='Actual negative')
+        green_dot = mlines.Line2D([], [], color='green', marker='o', linestyle='None',
+                                  markersize=10, label='Actual positive')
+        plt.legend(handles=[red_dot, green_dot])
+    plt.savefig(title + '.png')
     plt.show()
+    files.download(title + '.png')
 
 
 def process(process_id, send_conns, receive_conn, GSN, parent_queue):
@@ -133,9 +177,6 @@ def process(process_id, send_conns, receive_conn, GSN, parent_queue):
 
         time.sleep(random.random())
 
-    # final state of the clocks
-    # print(f'Process {process_id}')
-
 
 if __name__ == '__main__':
     # start of program
@@ -146,6 +187,9 @@ if __name__ == '__main__':
 
     # initialize shared memory variables
     global_seq_num = Value('i')
+
+    # initializing list for results table
+    table_data = []
 
     for n in (20, ):
         # the important GSN values to capture for final results
@@ -212,15 +256,34 @@ if __name__ == '__main__':
                 # plot the data
                 plot(title=f'Pr_p: n = {n}; m = {m}; k = {k}',
                      x_label='GSN (Global Sequence Number)', y_label='Pr_p (Probability of positive)',
-                     x_data=gsn_list, y_data=pr_p, color='blue')
+                     x_data=gsn_list, y_data=pr_p, color='b', legend=False)
 
-                plot(title=f'Pr_fp: n = {n}; m = {m}; k = {k}',
+                plot(title=f'Pr_fp ((1-pr_p)pr_p): n = {n}; m = {m}; k = {k}',
                      x_label='GSN (Global Sequence Number)', y_label='Pr_fp (Probability of false positive)',
                      x_data=gsn_list, y_data=pr_fp, color=actual_pn_colors)
 
-                plot(title=f'Pr_fp (delta equation): n = {n}; m = {m}; k = {k}',
-                     x_label='GSN (Global Sequence Number)', y_label='Pr_fp for delta (Probability of false positive)',
+                plot(title=f'Pr_fp ((1-pr_p)pr_{{delta(p)}}): n = {n}; m = {m}; k = {k}',
+                     x_label='GSN (Global Sequence Number)', y_label='Pr_fp (delta) (Probability of false positive)',
                      x_data=gsn_list, y_data=pr_fp_delta, color=actual_pn_colors)
 
+                acc, prec, fpr = compute_metrics(res)
+                table_data.append((n, m, k, acc, prec, fpr))
+
+    # tabulate the data
+    fig, ax = plt.subplots()
+    table = ax.table(cellText=table_data, colLabels=['Number of processes (n)',
+                                                     'Bloom clock size (m)',
+                                                     'Number of hash functions (k)',
+                                                     'Accuracy',
+                                                     'Precision',
+                                                     'False positive rate (fpr)'],
+                     cellLoc='center', loc='center')
+    table.set_fontsize(100)
+    table.scale(10, 10)
+    ax.axis('off')
+    plt.savefig('results_table.png', bbox_inches="tight")
+    plt.show()
+    files.download('results_table.png')
+
     # end of program
-    print(f'Main process ended (GSN value = {global_seq_num.value})')
+    print(f'Main process ended')
