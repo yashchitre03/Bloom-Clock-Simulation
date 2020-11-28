@@ -1,5 +1,5 @@
 import math
-from multiprocessing import Process, Pipe, Value, Queue
+from multiprocessing import Process, Value, Queue
 import random
 import time
 import numpy as np
@@ -7,10 +7,9 @@ from queue import Empty
 import matplotlib.pyplot as plt
 
 
-def positive_probability(m, By, Bz):
+def positive_probability(By, Bz):
     """
     calculates the probability of a positive using the binomial distribution
-    :param m: the size of bloom clock
     :param By: bloom clock By
     :param Bz: bloom clock bz
     :return: probability of positive
@@ -30,6 +29,27 @@ def positive_probability(m, By, Bz):
         probability *= (1 - sum_b)
 
     return probability
+
+
+def plot(title, x_label, y_label, x_data, y_data, color, font_styles=dict(fontsize=20, fontweight='bold')):
+    """
+    plots data for given values
+    :param title: heading of the plot
+    :param x_label: label of X-axis
+    :param y_label: label of Y-axis
+    :param x_data: data points for X-axis
+    :param y_data: data points for Y-axis
+    :param color: color of the plot points
+    :param font_styles: different styling options
+    :return: None
+    """
+    fig = plt.figure(figsize=(20, 10))
+    fig.set_facecolor('w')
+    plt.title(label=title, fontdict=font_styles)
+    plt.xlabel(x_label, fontdict=font_styles)
+    plt.ylabel(y_label, fontdict=font_styles)
+    plt.scatter(x_data, y_data, c=color)
+    plt.show()
 
 
 def process(process_id, send_conns, receive_conn, GSN, parent_queue):
@@ -77,7 +97,7 @@ def process(process_id, send_conns, receive_conn, GSN, parent_queue):
 
         # check if the clock should be captured
         if cur_gsn in capture_values:
-            parent_queue.put((cur_gsn, bloom_clock))
+            parent_queue.put((cur_gsn, vector_clock, bloom_clock))
 
         # INTERNAL EVENT
         uniform_dist_val = random.random()
@@ -91,7 +111,7 @@ def process(process_id, send_conns, receive_conn, GSN, parent_queue):
 
             # check if the clock should be captured
             if cur_gsn in capture_values:
-                parent_queue.put((cur_gsn, bloom_clock))
+                parent_queue.put((cur_gsn, vector_clock, bloom_clock))
 
         # RECEIVE EVENT
         try:
@@ -109,7 +129,7 @@ def process(process_id, send_conns, receive_conn, GSN, parent_queue):
 
             # check if the clock should be captured
             if cur_gsn in capture_values:
-                parent_queue.put((cur_gsn, bloom_clock))
+                parent_queue.put((cur_gsn, vector_clock, bloom_clock))
 
         time.sleep(random.random())
 
@@ -127,10 +147,10 @@ if __name__ == '__main__':
     # initialize shared memory variables
     global_seq_num = Value('i')
 
-    for n in (100, 200, 300):
+    for n in (20, ):
         # the important GSN values to capture for final results
         lower_limit = (10 * n)
-        upper_limit = n ** 2 + (10 * n)
+        upper_limit = n ** 2 + (10 * n) + 1
         capture_values = {val for val in range(lower_limit + 1, upper_limit, 10)}
         capture_values.add(lower_limit)
 
@@ -173,21 +193,34 @@ if __name__ == '__main__':
 
                 # calculate the probabilities for each data point
                 res.sort()
-                By = res[0][1]
-                plot_data = []
-                for gsn, Bz in res[1:]:
-                    pr_p = positive_probability(m, By, Bz)
-                    plot_data.append((gsn, pr_p))
+                _, Vy, By = res[0]
+                gsn_list, pr_p, pr_fp, pr_fp_delta, actual_pn_colors = [], [], [], [], []
+                for gsn, Vz, Bz in res[1:]:
+                    gsn_list.append(gsn)
+
+                    pos = positive_probability(By, Bz)
+                    pr_p.append(pos)
+
+                    false_pos = (1 - pos) * pos
+                    pr_fp.append(false_pos)
+
+                    false_pos_delta = (1 - pos) * int((Bz >= By).all())
+                    pr_fp_delta.append(false_pos_delta)
+
+                    actual_pn_colors.append('green' if int((Vy < Vz).all()) else 'red')
 
                 # plot the data
-                font_styling = dict(fontsize=20, fontweight='bold')
-                fig = plt.figure(figsize=(20, 10))
-                fig.set_facecolor('grey')
-                plt.title(label=f'n = {n}; m = {m}; k = {k}', fontdict=font_styling)
-                plt.xlabel('GSN (Global Sequence Number)', fontdict=font_styling)
-                plt.ylabel('Pr_p (Probability of positive)', fontdict=font_styling)
-                plt.scatter(*(zip(*plot_data)))
-                plt.show()
+                plot(title=f'Pr_p: n = {n}; m = {m}; k = {k}',
+                     x_label='GSN (Global Sequence Number)', y_label='Pr_p (Probability of positive)',
+                     x_data=gsn_list, y_data=pr_p, color='blue')
+
+                plot(title=f'Pr_fp: n = {n}; m = {m}; k = {k}',
+                     x_label='GSN (Global Sequence Number)', y_label='Pr_fp (Probability of false positive)',
+                     x_data=gsn_list, y_data=pr_fp, color=actual_pn_colors)
+
+                plot(title=f'Pr_fp (delta equation): n = {n}; m = {m}; k = {k}',
+                     x_label='GSN (Global Sequence Number)', y_label='Pr_fp for delta (Probability of false positive)',
+                     x_data=gsn_list, y_data=pr_fp_delta, color=actual_pn_colors)
 
     # end of program
     print(f'Main process ended (GSN value = {global_seq_num.value})')
