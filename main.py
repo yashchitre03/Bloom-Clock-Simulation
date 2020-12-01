@@ -6,7 +6,8 @@ import numpy as np
 from queue import Empty
 import matplotlib.pyplot as plt
 import matplotlib.lines as mlines
-from google.colab import files
+import os
+from itertools import repeat
 
 
 def positive_probability(By, Bz):
@@ -18,7 +19,7 @@ def positive_probability(By, Bz):
     """
 
     # calculate n choose k
-    comb = lambda n, k: math.factorial(n) // math.factorial(k) // math.factorial(n - k)
+    comb = lambda n, k: (math.factorial(n) // math.factorial(k) // math.factorial(n - k)) if n > k else 0
 
     n = np.sum(Bz)
     p = 1 / m
@@ -27,10 +28,21 @@ def positive_probability(By, Bz):
         sum_b = 0
         for l in range(By[i]):
             # binomial distribution formula
-            sum_b += comb(n, l) * (p ** l) * ((1 - p) ** (n - l))
+            sum_b += comb(n, l) * (p**l) * ((1 - p)**(n - l))
         probability *= (1 - sum_b)
 
     return probability
+
+
+def positive_probability_delta(By, Bz):
+    """
+    calculates the probability of a positive using the delta equation
+    :param By: bloom clock By
+    :param Bz: bloom clock Bz
+    :return: probability of positive
+    """
+
+    return int((Bz >= By).all())
 
 
 def compute_metrics(events_data):
@@ -39,18 +51,24 @@ def compute_metrics(events_data):
     :param events_data: list of gsn, vector clocks, and bloom clocks for the execution slice
     :return: accuracy, precision, and false positive rate
     """
+
     true_positive, true_negative, false_positive, false_negative = 0, 0, 0, 0
+    numerator, acc_denom, prec_denom, fpr_denom = 0, 0, 0, 0
     for y in range(len(events_data)):
         for z in range(len(events_data)):
+            # if y and z are the same events, skip
             if y == z:
                 continue
 
+            # extract the vector and bloom clocks for the y and z event (or x and x')
             _, Vy, By = events_data[y]
             _, Vz, Bz = events_data[z]
 
+            # perform causality check
             vector_y_before_z = (Vy < Vz).all()
             bloom_y_before_z = (Bz >= By).all()
 
+            # get the prediction scenarios
             if vector_y_before_z and bloom_y_before_z:
                 true_positive += 1
             elif vector_y_before_z and not bloom_y_before_z:
@@ -60,16 +78,31 @@ def compute_metrics(events_data):
             else:
                 true_negative += 1
 
+            # calculate pr_p and pr_delta-p for metrics without the vector clock
+            pr_p = positive_probability(By, Bz)
+            pr_delta_p = positive_probability_delta(By, Bz)
+            numerator += (1 - pr_p) * pr_delta_p
+            acc_denom += 1
+            prec_denom += pr_delta_p
+            fpr_denom += 1 - pr_p * pr_delta_p
+
+    # calculate the metrics
     accuracy = (true_positive + true_negative) / (true_positive + true_negative + false_positive + false_negative)
     precision = true_positive / (true_positive + false_positive)
     fpr = false_positive / (false_positive + true_negative)
 
-    return round(accuracy, 4), round(precision, 4), round(fpr, 4)
+    # calculate the metrics without vector clock
+    accuracy_hat = 1 - (numerator / acc_denom)
+    precision_hat = 1 - (numerator / prec_denom)
+    fpr_hat = numerator / fpr_denom
+
+    return map(round, (accuracy, precision, fpr, accuracy_hat, precision_hat, fpr_hat), repeat(4))
 
 
 def plot(title, x_label, y_label, x_data, y_data, color, font_styles=dict(fontsize=20, fontweight='bold'), legend=True):
     """
     plots data for given values
+    :param legend: whether to display the legend or not
     :param title: heading of the plot
     :param x_label: label of X-axis
     :param y_label: label of Y-axis
@@ -79,21 +112,43 @@ def plot(title, x_label, y_label, x_data, y_data, color, font_styles=dict(fontsi
     :param font_styles: different styling options
     :return: None
     """
+
     fig = plt.figure(figsize=(20, 10))
     fig.set_facecolor('w')
     plt.title(label=title, fontdict=font_styles)
     plt.xlabel(x_label, fontdict=font_styles)
     plt.ylabel(y_label, fontdict=font_styles)
+    plt.xticks(fontsize=15)
+    plt.yticks(fontsize=15)
     plt.scatter(x_data, y_data, c=color)
     if legend:
         red_dot = mlines.Line2D([], [], color='red', marker='o', linestyle='None',
                                 markersize=10, label='Actual negative')
         green_dot = mlines.Line2D([], [], color='green', marker='o', linestyle='None',
                                   markersize=10, label='Actual positive')
-        plt.legend(handles=[red_dot, green_dot])
-    plt.savefig(title + '.png')
+        plt.legend(handles=[red_dot, green_dot], prop={'size': 15})
+    plt.savefig(f'res{os.sep}{title}.png', bbox_inches='tight')
     plt.show()
-    files.download(title + '.png')
+
+
+def tabulate(title, cols, data):
+    """
+    creates a table for the given data
+    :param title: title of the table
+    :param cols: column labels of the table
+    :param data: data to fill the table
+    :return: None
+    """
+
+    fig, ax = plt.subplots()
+    table = ax.table(cellText=data, colLabels=cols,
+                     cellLoc='center', loc='center')
+    table.auto_set_font_size(False)
+    table.set_fontsize(55)
+    table.scale(15, 10)
+    ax.axis('off')
+    plt.savefig(f'res{os.sep}{title}.png', bbox_inches='tight')
+    plt.show()
 
 
 def process(process_id, send_conns, receive_conn, GSN, parent_queue):
@@ -112,6 +167,7 @@ def process(process_id, send_conns, receive_conn, GSN, parent_queue):
         updates the vector and bloom clocks of the process
         :return:
         """
+
         # update vector clock
         vector_clock[process_id] += 1
 
@@ -182,108 +238,105 @@ if __name__ == '__main__':
     # start of program
     print('Main process started')
 
-    # probability of an internal event
-    internal_prob = 0
-
     # initialize shared memory variables
     global_seq_num = Value('i')
 
     # initializing list for results table
-    table_data = []
+    table_w_VC, table_wo_VC = [], []
 
-    for n in (20, ):
-        # the important GSN values to capture for final results
-        lower_limit = (10 * n)
-        upper_limit = n ** 2 + (10 * n) + 1
-        capture_values = {val for val in range(lower_limit + 1, upper_limit, 10)}
-        capture_values.add(lower_limit)
+    # probability of an internal event
+    internal_prob = 0
 
-        for m in (int(0.1 * n), int(0.2 * n), int(0.3 * n)):
-            for k in (2, 3, 4):
-                # reset GSN
-                global_seq_num.value = 0
+    # number of processes
+    n = 20
 
-                # initialize the queue objects for message passing communication
-                queue_objs = []
-                for _ in range(n):
-                    queue_objs.append(Queue())
+    # the important GSN values to capture for final results
+    lower_limit = (10 * n)
+    upper_limit = n**2 + (10 * n) + 1
+    capture_values = {val for val in range(lower_limit + 1, upper_limit, 10)}
+    capture_values.add(lower_limit)
 
-                # main queue to get the desired data from the simulation
-                main_queue = Queue()
+    for m in map(int, (0.1 * n, 0.2 * n, 0.3 * n)):
+        for k in (2, 3, 4):
+            # reset GSN
+            global_seq_num.value = 0
 
-                # create process objects with the required arguments
-                processes = []
-                for i in range(n):
-                    process_queues = queue_objs[:]
-                    self_queue = process_queues.pop(i)
-                    other_queues = process_queues
-                    process_obj = Process(target=process, kwargs=dict(process_id=i, receive_conn=self_queue,
-                                                                      send_conns=other_queues, GSN=global_seq_num,
-                                                                      parent_queue=main_queue))
-                    processes.append(process_obj)
+            # initialize the queue objects for message passing communication
+            queue_objs = []
+            for _ in range(n):
+                queue_objs.append(Queue())
 
-                # run the processes
-                for process_obj in processes:
-                    process_obj.start()
+            # main queue to get the desired data from the simulation
+            main_queue = Queue()
 
-                # extract data from the main queue
-                res = []
-                for _ in range(len(capture_values)):
-                    res.append(main_queue.get())
+            # create process objects with the required arguments
+            processes = []
+            for i in range(n):
+                process_queues = queue_objs[:]
+                self_queue = process_queues.pop(i)
+                other_queues = process_queues
+                process_obj = Process(target=process, kwargs=dict(process_id=i, receive_conn=self_queue,
+                                                                  send_conns=other_queues, GSN=global_seq_num,
+                                                                  parent_queue=main_queue))
+                processes.append(process_obj)
 
-                # wait for the children processes to finish
-                for process_obj in processes:
-                    process_obj.join()
+            # run the processes
+            for process_obj in processes:
+                process_obj.start()
 
-                # calculate the probabilities for each data point
-                res.sort()
-                _, Vy, By = res[0]
-                gsn_list, pr_p, pr_fp, pr_fp_delta, actual_pn_colors = [], [], [], [], []
-                for gsn, Vz, Bz in res[1:]:
-                    gsn_list.append(gsn)
+            # extract data from the main queue
+            res = []
+            for _ in range(len(capture_values)):
+                res.append(main_queue.get())
 
-                    pos = positive_probability(By, Bz)
-                    pr_p.append(pos)
+            # wait for the children processes to finish
+            for process_obj in processes:
+                process_obj.terminate()
 
-                    false_pos = (1 - pos) * pos
-                    pr_fp.append(false_pos)
+            # calculate the probabilities for each data point
+            res.sort()
+            _, Vy, By = res[0]
+            gsn_list, pr_p, pr_fp, pr_fp_delta, actual_pn_colors = [], [], [], [], []
+            for gsn, Vz, Bz in res[1:]:
+                gsn_list.append(gsn)
 
-                    false_pos_delta = (1 - pos) * int((Bz >= By).all())
-                    pr_fp_delta.append(false_pos_delta)
+                pos = positive_probability(By, Bz)
+                pr_p.append(pos)
 
-                    actual_pn_colors.append('green' if int((Vy < Vz).all()) else 'red')
+                false_pos = (1 - pos) * pos
+                pr_fp.append(false_pos)
 
-                # plot the data
-                plot(title=f'Pr_p: n = {n}; m = {m}; k = {k}',
-                     x_label='GSN (Global Sequence Number)', y_label='Pr_p (Probability of positive)',
-                     x_data=gsn_list, y_data=pr_p, color='b', legend=False)
+                false_pos_delta = (1 - pos) * positive_probability_delta(By, Bz)
+                pr_fp_delta.append(false_pos_delta)
 
-                plot(title=f'Pr_fp ((1-pr_p)pr_p): n = {n}; m = {m}; k = {k}',
-                     x_label='GSN (Global Sequence Number)', y_label='Pr_fp (Probability of false positive)',
-                     x_data=gsn_list, y_data=pr_fp, color=actual_pn_colors)
+                actual_pn_colors.append('green' if int((Vy < Vz).all()) else 'red')
 
-                plot(title=f'Pr_fp ((1-pr_p)pr_{{delta(p)}}): n = {n}; m = {m}; k = {k}',
-                     x_label='GSN (Global Sequence Number)', y_label='Pr_fp (delta) (Probability of false positive)',
-                     x_data=gsn_list, y_data=pr_fp_delta, color=actual_pn_colors)
+            # plot the data
+            plot(title=f'Pr_p: n = {n}; m = {m}; k = {k}',
+                 x_label='GSN (Global Sequence Number)', y_label='Pr_p (Probability of positive)',
+                 x_data=gsn_list, y_data=pr_p, color='b', legend=False)
 
-                acc, prec, fpr = compute_metrics(res)
-                table_data.append((n, m, k, acc, prec, fpr))
+            plot(title=f'Pr_fp ((1-pr_p)pr_p): n = {n}; m = {m}; k = {k}',
+                 x_label='GSN (Global Sequence Number)', y_label='Pr_fp (Probability of false positive)',
+                 x_data=gsn_list, y_data=pr_fp, color=actual_pn_colors)
+
+            plot(title=f'Pr_fp ((1-pr_p)pr_{{delta(p)}}): n = {n}; m = {m}; k = {k}',
+                 x_label='GSN (Global Sequence Number)', y_label='Pr_fp (delta) (Probability of false positive)',
+                 x_data=gsn_list, y_data=pr_fp_delta, color=actual_pn_colors)
+
+            acc, prec, fpr, acc_hat, prec_hat, fpr_hat = compute_metrics(res)
+            table_w_VC.append((n, m, k, acc, prec, fpr))
+            table_wo_VC.append((n, m, k, acc_hat, prec_hat, fpr_hat))
 
     # tabulate the data
-    fig, ax = plt.subplots()
-    table = ax.table(cellText=table_data, colLabels=['Number of processes (n)',
-                                                     'Bloom clock size (m)',
-                                                     'Number of hash functions (k)',
-                                                     'Accuracy',
-                                                     'Precision',
-                                                     'False positive rate (fpr)'],
-                     cellLoc='center', loc='center')
-    table.set_fontsize(100)
-    table.scale(10, 10)
-    ax.axis('off')
-    plt.savefig('results_table.png', bbox_inches="tight")
-    plt.show()
-    files.download('results_table.png')
+    col_labels = ['Number of processes (n)',
+                  'Bloom clock size (m)',
+                  'Number of hash functions (k)',
+                  'Accuracy',
+                  'Precision',
+                  'False positive rate (fpr)']
+    tabulate(title='Table for equation 6', cols=col_labels, data=table_w_VC)
+    tabulate(title='Table for equations 10, 11 ,12', cols=col_labels, data=table_wo_VC)
 
     # end of program
     print(f'Main process ended')
