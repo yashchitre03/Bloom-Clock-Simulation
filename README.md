@@ -1,4 +1,4 @@
-# Bloom-Clock
+# Bloom Clock Simulation
 
 ## Introduction
 In this project, the bloom clocks have been used between different processes to simulate message-passing and clock updates. The feasibility of bloom clocks is studied in replacing vector clocks for determining the partial ordering of events in a distributed environment. 
