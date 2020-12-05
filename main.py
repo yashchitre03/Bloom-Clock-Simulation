@@ -13,8 +13,8 @@ from itertools import repeat
 def positive_probability(b_y, b_z):
     """
     calculates the probability of a positive using the binomial distribution
-    :param By: bloom clock By
-    :param Bz: bloom clock bz
+    :param b_y: bloom clock By
+    :param b_z: bloom clock bz
     :return: probability of positive
     """
 
