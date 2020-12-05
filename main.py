@@ -1,5 +1,5 @@
-import math
-from multiprocessing import Process, Value, Queue
+from math import factorial
+from multiprocessing import Process, Value, Queue, Pool, cpu_count
 import random
 import time
 import numpy as np
@@ -10,7 +10,7 @@ import os
 from itertools import repeat
 
 
-def positive_probability(By, Bz):
+def positive_probability(b_y, b_z):
     """
     calculates the probability of a positive using the binomial distribution
     :param By: bloom clock By
@@ -19,7 +19,11 @@ def positive_probability(By, Bz):
     """
 
     # calculate n choose k
-    comb = lambda n, k: (math.factorial(n) // math.factorial(k) // math.factorial(n - k)) if n > k else 0
+    comb = lambda n, k: (factorial(n) // factorial(k) // factorial(n - k)) if n > k else 0
+
+    mini = np.min(np.minimum(b_y, b_z))
+    By = b_y - mini
+    Bz = b_z - mini
 
     n = np.sum(Bz)
     p = 1 / m
@@ -28,7 +32,7 @@ def positive_probability(By, Bz):
         sum_b = 0
         for l in range(By[i]):
             # binomial distribution formula
-            sum_b += comb(n, l) * (p**l) * ((1 - p)**(n - l))
+            sum_b += comb(n, l) * (p ** l) * ((1 - p) ** (n - l))
         probability *= (1 - sum_b)
 
     return probability
@@ -45,6 +49,45 @@ def positive_probability_delta(By, Bz):
     return int((Bz >= By).all())
 
 
+def metrics_helper(o1, o2):
+    """
+    helper function to calculate the actual and estimated metrics
+    :param o1: event y object
+    :param o2: event x object
+    :return: computed metrics
+    """
+    # initialize
+    tp, tn, fp, fn = 0, 0, 0, 0
+
+    # extract the vector and bloom clocks for the y and z event (or x and x')
+    _, Vy, By = o1
+    _, Vz, Bz = o2
+
+    # perform causality check
+    vector_y_before_z = (Vy < Vz).all()
+    bloom_y_before_z = (Bz >= By).all()
+
+    # get the prediction scenarios
+    if vector_y_before_z and bloom_y_before_z:
+        tp = 1
+    elif vector_y_before_z and not bloom_y_before_z:
+        fn = 1
+    elif not vector_y_before_z and bloom_y_before_z:
+        fp = 1
+    else:
+        tn = 1
+
+    # calculate pr_p and pr_delta-p for metrics without the vector clock
+    pr_p = positive_probability(By, Bz)
+    pr_delta_p = positive_probability_delta(By, Bz)
+    numerator = (1 - pr_p) * pr_delta_p
+    acc_denom = 1
+    prec_denom = pr_delta_p
+    fpr_denom = 1 - pr_p * pr_delta_p
+
+    return np.array([tp, tn, fp, fn, numerator, acc_denom, prec_denom, fpr_denom])
+
+
 def compute_metrics(events_data):
     """
     computes the accuracy, precision, and false positive rate of the events from the execution slice
@@ -52,39 +95,13 @@ def compute_metrics(events_data):
     :return: accuracy, precision, and false positive rate
     """
 
-    true_positive, true_negative, false_positive, false_negative = 0, 0, 0, 0
-    numerator, acc_denom, prec_denom, fpr_denom = 0, 0, 0, 0
-    for y in range(len(events_data)):
-        for z in range(len(events_data)):
-            # if y and z are the same events, skip
-            if y == z:
-                continue
+    pool_size = cpu_count() * 2
+    with Pool(processes=pool_size) as pool:
+        op = pool.starmap(metrics_helper, ((events_data[y], events_data[z]) for y in range(len(events_data)) for z in
+                                           range(len(events_data)) if y != z))
 
-            # extract the vector and bloom clocks for the y and z event (or x and x')
-            _, Vy, By = events_data[y]
-            _, Vz, Bz = events_data[z]
-
-            # perform causality check
-            vector_y_before_z = (Vy < Vz).all()
-            bloom_y_before_z = (Bz >= By).all()
-
-            # get the prediction scenarios
-            if vector_y_before_z and bloom_y_before_z:
-                true_positive += 1
-            elif vector_y_before_z and not bloom_y_before_z:
-                false_negative += 1
-            elif not vector_y_before_z and bloom_y_before_z:
-                false_positive += 1
-            else:
-                true_negative += 1
-
-            # calculate pr_p and pr_delta-p for metrics without the vector clock
-            pr_p = positive_probability(By, Bz)
-            pr_delta_p = positive_probability_delta(By, Bz)
-            numerator += (1 - pr_p) * pr_delta_p
-            acc_denom += 1
-            prec_denom += pr_delta_p
-            fpr_denom += 1 - pr_p * pr_delta_p
+    true_positive, true_negative, false_positive, false_negative, numerator, acc_denom, prec_denom, fpr_denom = np.sum(
+        np.array(op), axis=0)
 
     # calculate the metrics
     accuracy = (true_positive + true_negative) / (true_positive + true_negative + false_positive + false_negative)
@@ -176,6 +193,10 @@ def process(process_id, send_conns, receive_conn, GSN, parent_queue):
             hash_val = hash((process_id, event_count, seed))
             index = hash_val % m
             bloom_clock[index] += 1
+            time.sleep(random.random())
+
+    # give all processes some time to warm-up
+    time.sleep(1 - (process_id / n))
 
     # number of events executed at the current process
     event_count = 0
@@ -195,7 +216,6 @@ def process(process_id, send_conns, receive_conn, GSN, parent_queue):
         pj_queue = random.choice(send_conns)
         pj_queue.put((vector_clock, bloom_clock))
 
-        # check if the clock should be captured
         if cur_gsn in capture_values:
             parent_queue.put((cur_gsn, vector_clock, bloom_clock))
 
@@ -231,10 +251,11 @@ def process(process_id, send_conns, receive_conn, GSN, parent_queue):
             if cur_gsn in capture_values:
                 parent_queue.put((cur_gsn, vector_clock, bloom_clock))
 
-        time.sleep(random.random())
-
 
 if __name__ == '__main__':
+    """
+    driver code. change the parameters as suitable for each simulation and run
+    """
     # start of program
     print('Main process started')
 
@@ -248,16 +269,18 @@ if __name__ == '__main__':
     internal_prob = 0
 
     # number of processes
-    n = 20
+    n = 100
 
     # the important GSN values to capture for final results
     lower_limit = (10 * n)
-    upper_limit = n**2 + (10 * n) + 1
+    upper_limit = n ** 2 + (10 * n) + 1
     capture_values = {val for val in range(lower_limit + 1, upper_limit, 10)}
     capture_values.add(lower_limit)
 
     for m in map(int, (0.1 * n, 0.2 * n, 0.3 * n)):
         for k in (2, 3, 4):
+
+            s = time.time()
             # reset GSN
             global_seq_num.value = 0
 
@@ -294,10 +317,17 @@ if __name__ == '__main__':
                 process_obj.terminate()
 
             # calculate the probabilities for each data point
-            res.sort()
-            _, Vy, By = res[0]
+            first = min(res)
+            _, Vy, By = first
+            res.remove(first)
             gsn_list, pr_p, pr_fp, pr_fp_delta, actual_pn_colors = [], [], [], [], []
-            for gsn, Vz, Bz in res[1:]:
+
+            even_err_count = 0
+            for gsn, Vz, Bz in res:
+
+                if np.sum(Bz) % 2 == 1:
+                    even_err_count += 1
+
                 gsn_list.append(gsn)
 
                 pos = positive_probability(By, Bz)
@@ -309,7 +339,7 @@ if __name__ == '__main__':
                 false_pos_delta = (1 - pos) * positive_probability_delta(By, Bz)
                 pr_fp_delta.append(false_pos_delta)
 
-                actual_pn_colors.append('green' if int((Vy < Vz).all()) else 'red')
+                actual_pn_colors.append('green' if (Vy < Vz).all() else 'red')
 
             # plot the data
             plot(title=f'Pr_p: n = {n}; m = {m}; k = {k}',
@@ -327,6 +357,9 @@ if __name__ == '__main__':
             acc, prec, fpr, acc_hat, prec_hat, fpr_hat = compute_metrics(res)
             table_w_VC.append((n, m, k, acc, prec, fpr))
             table_wo_VC.append((n, m, k, acc_hat, prec_hat, fpr_hat))
+
+            e = time.time()
+            print(f'Simulation\'s total runtime: {e - s} with even error: {even_err_count}')
 
     # tabulate the data
     col_labels = ['Number of processes (n)',
